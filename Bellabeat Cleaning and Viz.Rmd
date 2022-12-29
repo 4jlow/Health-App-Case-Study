@@ -1,0 +1,621 @@
+---
+title: "Fitness App Case Study"
+author: "Justin Low"
+date: "2022-12-26"
+output: html_document
+---
+
+
+0. Opening Initial Libraries
+```{r setup, include=FALSE}
+library(tidyverse)
+library(ggplot2)
+library(ggpubr)
+library(janitor)
+```
+
+1. Importing Datasets:
+Knowing our task,we will only import datasets relevant to answering our problems.
+The focus will be on: Daily Activity, Daily Sleep, Hourly Steps, Intensities, and Minutes MET converted into Hours.
+There are too few logs in heartrate and weight logs to properly apply to the population, however the weight logs could still provide useful insights
+for recommendations even with a small sample.
+```{r}
+setwd("data")
+daily_activity <- read.csv("dailyActivity_merged.csv")
+daily_sleep <- read.csv("sleepDay_merged.csv")
+hourly_steps <- read.csv("hourlySteps_merged.csv")
+hourly_intensity <- read.csv("hourlyIntensities_merged.csv")
+minutes_MET <- read.csv("minuteMETsNarrow_merged.csv")
+weight_log <- read.csv("weightLogInfo_merged.csv")
+
+```
+
+2. Cleaning and Formatting:
+2.1 Verifying number of users
+```{r}
+n_distinct(daily_activity$Id, na.rm = FALSE)
+#33
+n_distinct(daily_sleep$Id, na.rm = FALSE)
+#24
+n_distinct(hourly_steps$Id, na.rm = FALSE)
+#33
+n_distinct(hourly_intensity$Id, na.rm = FALSE)
+#33
+n_distinct(minutes_MET$Id, na.rm = FALSE)
+#33
+n_distinct(weight_log$Id, na.rm = FALSE)
+#8
+```
+2.2 Checking for duplicates and NA
+```{r}
+sum(duplicated(daily_activity))
+#0
+sum(duplicated(daily_sleep))
+#3
+sum(duplicated(hourly_steps))
+#0
+sum(duplicated(hourly_intensity))
+#0
+sum(duplicated(minutes_MET))
+#0
+sum(duplicated(weight_log))
+#0
+
+sum(is.na(daily_activity))
+#0
+sum(is.na(daily_sleep))
+#0
+sum(is.na(hourly_steps))
+#0
+sum(is.na(hourly_intensity))
+#0
+sum(is.na(minutes_MET))
+#0
+sum(is.na(weight_log))
+#65
+```
+2.3 Removing duplicates from daily sleep.
+No NAs are dropped since the only table that has NAs, has them for the majority of its observations
+```{r}
+daily_sleep <- daily_sleep %>%
+  distinct() %>%
+  drop_na()
+#Original 413 observations down to 410
+
+sum(duplicated(daily_sleep))
+#0
+```
+2.4 Converting minutes_MET to hourly
+Even though METs can shift quickly based on activity levels, I want to turn it into a form that can work with hourly intensity. Although this will mean I will lose the peaks of METs, it would make it easier to smooth out the overall trends. 
+```{r}
+#Convert text to date time format
+minutes_MET$ActivityMinute <- as.POSIXct(minutes_MET$ActivityMinute, format = "%m/%d/%Y %I:%M:%S %p")
+
+# Extract hour from POSIXct object
+minutes_MET$hour <- format(minutes_MET$ActivityMinute, "%H")
+minutes_MET$day <- format(minutes_MET$ActivityMinute, "%Y-%m-%d")
+
+# Group data by hour
+grouped_MET <- minutes_MET %>%
+              group_by(Id, day, hour)
+
+# Calculate average MET value for each hour
+MET_avg <- summarise(grouped_MET, avg_MET = mean(METs))
+
+# Create new dataframe with hour as column and average MET as value
+hourly_MET <- as.data.frame(MET_avg)
+```
+2.5 Convert all dates into day and hour column to have similar formatting
+I converted my dates into POSIXct objects, since it allows for more control over both dates and time, and stores date times as seconds since the start of 1970, which could be useful if I need to subtract dates.
+
+```{r}
+hourly_steps$ActivityHour <- as.POSIXct(hourly_steps$ActivityHour, format = "%m/%d/%Y %I:%M:%S %p")
+hourly_steps$hour <- format(hourly_steps$ActivityHour, "%H")
+hourly_steps$day <- format(hourly_steps$ActivityHour, "%Y-%m-%d")
+
+hourly_intensity$ActivityHour <- as.POSIXct(hourly_intensity$ActivityHour, format = "%m/%d/%Y %I:%M:%S %p")
+hourly_intensity$hour <- format(hourly_intensity$ActivityHour, "%H")
+hourly_intensity$day <- format(hourly_intensity$ActivityHour, "%Y-%m-%d")
+
+daily_activity$ActivityDate <- as.POSIXct(daily_activity$ActivityDate, format = "%m/%d/%Y")
+
+daily_sleep$SleepDay <- as.POSIXct(daily_sleep$SleepDay, format = "%m/%d/%Y")
+
+weight_log$Date <- as.POSIXct(weight_log$Date, format = "%m/%d/%Y")
+```
+2.6 reformat column names
+Want to ensure all column names follow the same syntax and style for when they get merged later on.
+
+```{r}
+daily_activity <- clean_names(daily_activity)
+daily_sleep <- clean_names(daily_sleep)
+hourly_intensity <- clean_names(hourly_intensity)
+hourly_MET <- clean_names(hourly_MET)
+hourly_steps <- clean_names(hourly_steps)
+weight_log <- clean_names(weight_log)
+
+head(daily_activity)
+```
+
+2.7 Aggregating Data
+Although not best practice, to make things easier to plot and analyze, I will be merging the daily tables and the hourly tables together.
+I could also fuse the hourly tables with the daily tables, but the daily tables already have the values, barring MET.
+```{r}
+#940 obs in daily_activity, 410 in daily_sleep. left outer join
+daily_metrics <-  merge(daily_activity, daily_sleep, by.x = c("id", "activity_date"), by.y = c("id", "sleep_day"), all.x = TRUE)
+
+hourly_intensity_steps <- merge(hourly_intensity, hourly_steps, by.x = c("id", "day", "hour") , by.y = c("id","day", "hour"), all.x = FALSE)
+
+hourly_metrics <- merge(hourly_MET, hourly_intensity_steps, by.x = c("id", "day", "hour") , by.y = c("id","day", "hour"), all.x=FALSE)
+#Lost 6 observations
+
+#Which records were missing?
+anti_join(hourly_steps,hourly_MET, by = c("id", "day", "hour"))
+
+#The 6 missing records were on May 12th of 2016
+hourly_MET %>%
+  filter(day == "2016-05-12") %>%
+  head(n=5)
+#So it seems this was the last day of data recording, and converting the minutes MET to hourly ended up truncating a few observations. However, 6 observations out of 22k won't affect the results significantly.
+```
+
+3. Analyze and Share:
+
+3.1 Activity Classification:
+For adults, the recommendation for a healthy lifestyle is more than 10,000 steps per day. As per the recommendations from https://www.10000steps.org.au/articles/healthy-lifestyles/counting-steps/, we can separate users into 5 categories. 
+Sedentary is less than 5,000 steps per day 
+Low active is 5,000 to 7,499 steps per day
+Somewhat active is 7,500 to 9,999 steps per day
+Active is more than 10,000 steps per day
+Highly active is more than 12,500 
+
+We could then see the distribution of our population (even with only 33 samples)
+
+```{r}
+daily_averages <- daily_metrics %>%
+  group_by(id) %>%
+  summarize(mean_daily_steps = mean(total_steps), mean_daily_calories = mean(calories), 
+            mean_daily_distance = mean(total_distance), mean_daily_sleep = mean(total_minutes_asleep, na.rm = TRUE) ) %>%
+  mutate(distance_per_step = mean_daily_distance / mean_daily_steps) 
+
+#As seen before, 9 individuals have no sleep data, but some individuals have surprisingly low sleep times. Upon further investigation of one of the lower numbers:
+daily_metrics %>%
+  filter(id == 7007744171) %>%
+  head(n=5)
+#Assuming there was no error in submission, it could mean anything from insomnia to removing the fitness device during sleep. This should be investigated further.
+#The stride distance for each user also doesn't vary much, thus distance can be considered redundant and is fully represented by steps.
+
+
+daily_averages <- daily_averages %>%
+  mutate(activity_level = case_when(
+    mean_daily_steps < 5000 ~ "sedentary",
+    mean_daily_steps >= 5000 & mean_daily_steps < 7499 ~ "low active", 
+    mean_daily_steps >= 7500 & mean_daily_steps < 9999 ~ "somewhat active", 
+    mean_daily_steps >= 10000 & mean_daily_steps < 12499 ~ "active",
+    mean_daily_steps >= 12500 ~ "very active"
+  ))
+
+#Group by each category for visualization
+activity_percent <- daily_averages %>%
+  group_by(activity_level) %>%
+  summarise(total = n()) %>%
+  mutate(total_count = sum(total)) %>%
+  group_by(activity_level) %>%
+  summarise(total_percent = total / total_count) %>%
+  mutate(labels = scales::percent(total_percent))
+
+#Order Factors in categories
+activity_percent$activity_level <- factor(activity_percent$activity_level, levels = c("very active", "active", "somewhat active", "low active", "sedentary"))
+
+```
+
+3.2 Visualize distribution of activity via steps
+```{r}
+steps_plot <- ggplot(activity_percent, aes(x="", y = total_percent, fill = activity_level)) +
+  geom_bar(width = 1, size = 1, color = "white", stat = "identity")+
+  coord_polar("y") + 
+  theme_minimal() +
+  geom_text(aes(x=1.31, label = paste0(labels, "%")),
+       position = position_stack(vjust = 0.5)) +
+  labs(x = NULL, y = NULL, fill = NULL,
+       title = "User Type Distribution") + 
+  guides(fill = guide_legend(reverse = TRUE)) + 
+  scale_fill_manual(values = c("#ffd700", "#bcbcbc", "#ffa500", "#254290", "#eab676"))+theme_classic() +
+  theme(axis.line = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        plot.title = element_text(hjust = 0.5, color = "#666666"))
+
+steps_plot
+```
+
+From this chart, we can see that most of the users of the are less than "active". 
+Even with a small sample size, if we're assuming that these results are representative of the population,
+we can see that the users of the device are still slightly more active than the general public, as the [Ghent Study](https://academic.oup.com/her/article/26/2/372/585298) puts the average active population measured via steps at at most 8%. 
+However, the population of active users still makes up a minority of total users, and the less than active market would prove a larger 
+market to increase sales from.
+
+
+3.3 Visualize Calories Burned for the amount of steps
+Steps aren't the only metric of physical activity and may not be the best indicator for overall exercise performed and calories burned. This discrepancy
+could be explained by heart rate and MET. However, since MET is a calculation derived from heart rate, it may be a better indicator as we do not 
+have the data for age. Also from the calorie data, it seems that users did not factor in basal metabolic rate into their calories burned while others did, which does make it difficult to distinguish between the two. Even worst is there seems to be a large variation between basal metabolic rates, and some samples also change the way they calculate calculate metabolic rate after a certain period of time, which makes distinguishing between the two even harder.
+Below, the total number of calories will be compared to both total number of steps and MET. 
+
+```{r}
+#Converting hourly MET to average MET pet id
+average_MET <- hourly_MET %>%
+  group_by(id)%>%
+  summarise(mean_MET = mean(avg_met))
+
+#left join it to the daily averages
+daily_averages <-  merge(daily_averages, average_MET, by = "id" , all.x = TRUE)
+
+ggarrange(
+ggplot(daily_averages, aes(x=mean_daily_steps, y=mean_daily_calories))+
+  geom_jitter() +
+  geom_smooth(color = "red") + 
+  labs(title = "Daily steps vs Calories Burned", x = "Average steps", y= "Calories Burned") +
+   theme(panel.background = element_blank(),
+        plot.title = element_text( size=14, hjust = 0.5, color = "#666666")),
+ggplot(daily_averages, aes(x=mean_MET, y=mean_daily_calories))+
+  geom_jitter() +
+  geom_smooth(color = "red") + 
+  labs(title = "Mean MET vs Calories Burned", x = "Average MET", y= "Calories Burned") +
+   theme(panel.background = element_blank(),
+        plot.title = element_text( size=14, hjust = 0.5, color = "#666666"))
+)
+
+```
+
+Recording Issues aside, higher activity scores are typically associated with higher caloried burned. While there is quite a bit of noise, the overall trend does appear to be positive once we can distinguish between
+
+
+3.4 Visualize Use Cases for Weight Logs
+While there is a limited amount of data for weight, we can still draw some insight from the data that we currently have.
+Mainly, the characteristics between manual and automatic reporting. Below, the average weight and total log of users who did report
+are stacked up against one another. 
+```{r}
+manual_char <- weight_log %>%
+  group_by(is_manual_report, id) %>%
+  summarize(total_logs = n(), users = n_distinct(id), avg_weight = mean(weight_pounds)) %>%
+  mutate(is_manual_report = recode(is_manual_report, True = 'Manual Report', False = 'Passive Report'))
+
+
+weight_plot <- ggplot(manual_char,aes(x = avg_weight, y = total_logs, fill = is_manual_report)) +
+  geom_bar(stat = "identity") +
+  coord_cartesian(xlim = c(100, 300)) +
+  labs(x = "Average Weight(Lbs)", y = "Total Logs", fill = NULL,
+       title = "Log Type Distribution")+
+  theme(plot.title = element_text(hjust = 0.5, color = "#666666"))
+  
+weight_plot
+```
+
+
+Although the data is sparse, it could open up further research as there is a clear divide in the average weights between those who manually report their
+weight and those who passive report their weight (through synced scales). There could be many reasons for the discrepancy in the total number of logs, such as shame, convenience, or access to health products. None of these can be answered with the current data, but could be apart of the recommendations
+for further data collections.
+
+3.5 Visualizing Sleep Demographics
+If possible, we want to figure out why only 24 of our 33 population sample have recorded data. Or more specifically, deduce potential reasons
+for why 9 users did not. These could range anywhere from removing their device long before bed, or just not sleeping. Below are some basic 
+metrics of the users who slept daily
+```{r}
+#First lets grab the metrics
+sleep_metrics <- daily_sleep %>%
+  group_by(id) %>%
+  summarize(total_sleeps = n(), average_sleep_time = mean(total_minutes_asleep)/60, average_time_before_sleep = mean(total_time_in_bed-total_minutes_asleep)/60)
+
+sleep_metrics <- sleep_metrics %>%
+  mutate(nightly_usage = case_when(
+    total_sleeps >= 1 & total_sleeps <= 10 ~ "low use",
+    total_sleeps >= 11 & total_sleeps <= 20 ~ "moderate use", 
+    total_sleeps >= 21 & total_sleeps <= 31 ~ "high use", 
+  ))
+
+
+ggplot(sleep_metrics, aes(x= total_sleeps)) + 
+  geom_histogram(color="darkblue", fill="lightblue") + 
+  labs(title = "Total Tracked Sleeps", x="Sleeps", y="# of Individuals", fill = NULL) +
+  theme(plot.title = element_text(hjust = 0.5, color = "#666666"))
+
+
+
+#While we shouldn't assume, its probably safe to guess that most people probably sleep more than 5 times in a month, and that the low number of logs is a result of people just taking off their device, else that 1 person who slept 1 hour for the entire month probably isn't having the best of times. To visualize this better, we will load our minute table to best find what we're looking for. 
+
+minute_sleep <- read.csv("data/minuteSleep_merged.csv")
+minute_sleep$date <- as.POSIXct(minute_sleep$date, format = "%m/%d/%Y %I:%M:%S %p")
+minute_sleep$hour <- format(minute_sleep$date, format = "%H:00")
+
+
+minute_aggr <- minute_sleep %>%
+  group_by(hour,value) %>%
+  summarize(sleep = n())
+
+minute_aggr$value <- factor(minute_aggr$value, levels = c(1,2,3), labels = c("Light Sleep","Medium Sleep", "Heavy Sleep"))
+  
+
+sleep_plot <- ggplot(minute_aggr) +
+  geom_col(mapping = aes(x=hour, y = sleep, fill = value)) + 
+  labs(title = "Sleep Distribution by Time of Day", x="", y="Total Hours", fill = NULL) + 
+  scale_fill_manual(values = c("#254290", "#bcbcbc", "#ffa500")) +
+  theme(axis.text.x = element_text(angle = 90), plot.title = element_text(hjust = 0.5, color = "#666666"))
+
+sleep_plot
+```
+
+
+This distribution seems fairly reasonable with most users sleeping at expected times, with a few in the middle of the day for expected naps, but does the level of activity (measured in calories burned) also correlate with time it takes to fall asleep? Below is the visualization for that.
+
+3.5.1 
+
+```{r}
+energy_tired <- merge(sleep_metrics,daily_averages, by = "id", all.x = TRUE)
+
+ggarrange(
+ggplot(energy_tired, aes(x = mean_daily_calories, y = average_time_before_sleep)) +
+  geom_point() +
+  geom_smooth() + 
+  ylim(0,1) +
+  labs(x = "Average Calories Burnt", y = "Average Time to Sleep(h)", title = "Calories vs Time to Sleep") +
+  theme(plot.title = element_text(hjust = 0.5, color = "#666666")),
+ggplot(energy_tired, aes(x = mean_daily_calories, y = average_sleep_time)) +
+  geom_point() +
+  geom_smooth() + 
+  labs(x = "Average Calories Burnt", y = "Average Time Slept", title = "Calories vs Time Slept") +
+  theme(plot.title = element_text(hjust = 0.5, color = "#666666")), nrow = 2
+)
+
+```
+
+
+
+From the plots above, there does not appear to be much correlation between calories burnt for the day, and how long it takes a person to sleep or their duration of sleep. 
+
+
+3.6 Tracking activity by the day compared to night
+So if people are taking off their devices during the night, are they keeping them on all day? We can use the total minutes of activity in the 
+daily_activity section to calculate how much activity is being done in a given day(1440 minutes)
+
+```{r}
+#Categorize Daily Use of device
+usage_levels <- daily_activity %>%
+  group_by(id) %>%
+  summarize(count = n()) %>%
+  mutate(daily_usage = case_when(
+    count >= 1 & count <= 10 ~ "low use",
+    count >= 11 & count <= 20 ~ "moderate use", 
+    count >= 21 & count <= 31 ~ "high use", 
+  ))
+
+usage_percentage <- usage_levels %>%
+  group_by(daily_usage) %>%
+  summarize(count = n()) %>%
+  mutate(total = sum(count))%>%
+  group_by(daily_usage)%>%
+  summarize(percent_total = count/total)
+
+
+day_use_plot <- ggplot(usage_percentage, aes(x="", y = percent_total, fill = daily_usage)) +
+  geom_bar(width = 1, size = 1, color = "white", stat = "identity")+
+  coord_polar("y") + 
+  theme_minimal() +
+  geom_text(aes(x=1.31, label = round(100*percent_total)),
+       position = position_stack(vjust = 0.5)) +
+  labs(x = NULL, y = NULL, fill = NULL,
+       title = "Daily User Type Distribution") + 
+  guides(fill = guide_legend(reverse = TRUE)) + 
+  scale_fill_manual(values = c("#004d99", "#3399ff", "#cce6ff")) + 
+  theme_classic() +
+  theme(axis.line = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        plot.title = element_text(hjust = 0.5, color = "#666666"))
+
+day_use_plot
+#Most of those sampled do wear the device at least 21 times during the month
+
+
+usage_percentage
+
+#Appending Usage Levels to Daily Activity
+
+daily_usage <- daily_activity %>%
+  mutate(usage_total = very_active_minutes + fairly_active_minutes + lightly_active_minutes + sedentary_minutes) %>%
+  mutate(usage_percentage = usage_total/1440)
+
+daily_usage <- merge(daily_usage, usage_levels, by = "id", all.x = TRUE)
+daily_usage <- merge(daily_usage, sleep_metrics, by = "id", all.x = TRUE)
+daily_usage <- daily_usage %>%  
+  mutate(nightly_usage = replace_na(as.character(nightly_usage), "no use"))
+
+average_usage <- merge(daily_averages, usage_levels, by = "id", all.x = TRUE)
+average_usage <- merge(average_usage, sleep_metrics, by = "id", all.x = TRUE)
+average_usage <- average_usage %>%  
+  mutate(nightly_usage = replace_na(as.character(nightly_usage), "no use"))
+
+#Now we can determine the correlation between nightly usage and daily usage. Visualized via heat map
+
+average_usage %>% 
+  group_by(daily_usage,nightly_usage)%>%
+  summarize(count = n()) %>%
+  ggplot(aes(x= nightly_usage, y=daily_usage, fill = count))+ 
+  geom_tile() +
+  labs(x = "Night", y = "Day", fill = NULL, title = "Day vs Night Usage" ) +
+  theme(plot.title = element_text(hjust = 0.5, color = "#666666"))
+
+```
+
+
+Overall, not much here, apart from day users who are stringent with wearing their device, are also more likely to use it during sleep as well.
+
+3.7 Determining Activity Level by Day Use
+Now, device wearers are more likely to use their device during the day than at night/during sleep, but how much of that day are they actually wearing the
+device? Below, the use percent for each day will be calculated into 3 categories: All-day, More than half the day, Less than half the day, before seeing the distribution between high use, moderate use, and low use users.
+
+```{r}
+daily_usage <- daily_usage %>% 
+  mutate(usage_category = case_when(
+    usage_percentage == 1 ~ "all day",
+    usage_percentage < 1 & usage_percentage >= 0.5 ~ "more than half day",
+     usage_percentage < 0.5 & usage_percentage >= 0 ~ "less than half day"
+  ))
+
+overall_use <- daily_usage %>%
+  group_by(usage_category)%>%
+  summarize(total = n()) %>%
+  mutate(totals = sum(total)) %>%
+  group_by(usage_category) %>%
+  summarise(total_percent = total / totals) %>%
+  mutate(labels = scales::percent(total_percent))
+
+high_use <- daily_usage%>%
+  filter(daily_usage == "high use") %>%
+  group_by(usage_category)%>%
+  summarize(total = n()) %>%
+  mutate(totals = sum(total)) %>%
+  group_by(usage_category) %>%
+  summarise(total_percent = total / totals) %>%
+  mutate(labels = scales::percent(total_percent))
+
+moderate_use <- daily_usage%>%
+  filter(daily_usage == "moderate use") %>%
+  group_by(usage_category)%>%
+  summarize(total = n()) %>%
+  mutate(totals = sum(total)) %>%
+  group_by(usage_category) %>%
+  summarise(total_percent = total / totals) %>%
+  mutate(labels = scales::percent(total_percent))
+
+low_use <- daily_usage%>%
+  filter(daily_usage == "low use") %>%
+  group_by(usage_category)%>%
+  summarize(total = n()) %>%
+  mutate(totals = sum(total)) %>%
+  group_by(usage_category) %>%
+  summarise(total_percent = total / totals) %>%
+  mutate(labels = scales::percent(total_percent))
+
+overall_use$usage_category <-factor(overall_use$usage_category, levels = c("all day", "more than half day", "less than half day"))
+high_use$usage_category <-factor(high_use$usage_category, levels = c("all day", "more than half day", "less than half day"))
+moderate_use$usage_category <-factor(moderate_use$usage_category, levels = c("all day", "more than half day", "less than half day"))
+low_use$usage_category <-factor(low_use$usage_category, levels = c("all day", "more than half day", "less than half day"))
+
+
+
+overall_plot<- ggplot(overall_use, aes(x="",y=total_percent, fill=usage_category)) +
+  geom_bar(size = 1, color = "white", stat = "identity", width = 1)+
+  coord_polar("y", start=0)+
+  theme_minimal()+
+  theme(axis.title.x= element_blank(),
+        axis.title.y = element_blank(),
+        panel.border = element_blank(), 
+        axis.ticks = element_blank(),
+        panel.grid = element_blank(), 
+        axis.text.x = element_blank(),
+        plot.title = element_text(hjust = 0.5, size=14, face = "bold"),
+        plot.subtitle = element_text(hjust = 0.5, color = "#666666")) +
+    scale_fill_manual(values = c("#004d99", "#3399ff", "#cce6ff"))+
+  geom_text(aes(x=1.35, label = labels),
+            position = position_stack(vjust = 0.5), size = 3.5)+
+  labs(title="Overall Usage", subtitle = "Total Users", fill = NULL)
+
+
+high_plot<- ggplot(high_use, aes(x="",y=total_percent, fill=usage_category)) +
+  geom_bar(size = 1, color = "white", stat = "identity", width = 1)+
+  coord_polar("y", start=0)+
+  theme_minimal()+
+  theme(axis.title.x= element_blank(),
+        axis.title.y = element_blank(),
+        panel.border = element_blank(), 
+        axis.ticks = element_blank(),
+        panel.grid = element_blank(), 
+        axis.text.x = element_blank(),
+        plot.title = element_text(hjust = 0.5, size=14, face = "bold"),
+        plot.subtitle = element_text(hjust = 0.5, color = "#666666"),
+        legend.position = "none") +
+    scale_fill_manual(values = c("#004d99", "#3399ff", "#cce6ff"))+
+  geom_text(aes(x=1.2, label = labels),
+            position = position_stack(vjust = 0.5), size = 3.5)+
+  labs(title="", subtitle = "High Use ~ 21+ Days", fill = NULL)
+
+moderate_plot<- ggplot(moderate_use, aes(x="",y=total_percent, fill=usage_category)) +
+  geom_bar(size = 1, color = "white", stat = "identity", width = 1)+
+  coord_polar("y", start=0)+
+  theme_minimal()+
+  theme(axis.title.x= element_blank(),
+        axis.title.y = element_blank(),
+        panel.border = element_blank(), 
+        axis.ticks = element_blank(),
+        panel.grid = element_blank(), 
+        axis.text.x = element_blank(),
+        plot.title = element_text(hjust = 0.5, size=14, face = "bold"),
+        plot.subtitle = element_text(hjust = 0.5, color = "#666666"),
+        legend.position = "none") +
+    scale_fill_manual(values = c("#004d99", "#3399ff", "#cce6ff"))+
+  geom_text(aes(x=1.2, label = labels),
+            position = position_stack(vjust = 0.5), size = 3.5)+
+  labs(title="", subtitle = "Moderate Use ~ 11-20 Days", fill = NULL)
+
+low_plot<- ggplot(low_use, aes(x="",y=total_percent, fill=usage_category)) +
+  geom_bar(size = 1, color = "white", stat = "identity", width = 1)+
+  coord_polar("y", start=0)+
+  theme_minimal()+
+  theme(axis.title.x= element_blank(),
+        axis.title.y = element_blank(),
+        panel.border = element_blank(), 
+        axis.ticks = element_blank(),
+        panel.grid = element_blank(), 
+        axis.text.x = element_blank(),
+        plot.title = element_text(hjust = 0.5, size=14, face = "bold"),
+        plot.subtitle = element_text(hjust = 0.5, color = "#666666"),
+        legend.position = "none") +
+    scale_fill_manual(values = c("#004d99", "#3399ff", "#cce6ff"))+
+  geom_text(aes(x=1.2, label = labels),
+            position = position_stack(vjust = 0.5), size = 3.5)+
+  labs(title="", subtitle = "Low Use ~10 and Under Days", fill = NULL)
+
+
+ggarrange(overall_plot,
+          ggarrange(high_plot,moderate_plot,low_plot,ncol=3),nrow = 2)
+```
+
+
+Surprisingly, over fifty percent of logged entries contain the users wearing the device for the entire day. Even more surprising is that
+75% of low use users, wear it for the entire day compared to under 50% for high use users, with moderate users between them.
+
+This could provide some insight to how the device is being used among each user.To provide some context before making any recommendation, we would also have to determine the the typical level activity level (measured in steps) for each use case
+
+3.8 Contextualizing the Result in 3.7
+Below we take the average in steps for each use case to drive some form of insights
+```{r}
+usage_activity_level <- daily_usage %>%
+  group_by(daily_usage, usage_category)%>%
+  summarize(mean_steps = mean(total_steps))
+
+usage_activity_level$usage_category <-factor(usage_activity_level$usage_category, levels = c("all day", "more than half day", "less than half day"))
+usage_activity_level$daily_usage <-factor(usage_activity_level$daily_usage, levels = c("low use", "moderate use", "high use"))
+
+
+ggplot(usage_activity_level, aes(x= daily_usage, y = mean_steps, fill = usage_category)) + 
+  geom_bar(stat = "identity", position = position_dodge(), alpha = 0.75) +
+  labs(x = "", y = "Average Steps", fill = "Usage Category", title = "Average Steps per Use Group") +
+  theme(plot.title = element_text(hjust = 0.5, color = "#666666")) +
+  scale_fill_manual(values = c("#254290", "#bcbcbc", "#ffa500"))
+
+
+```
+
+From the plot, low use individuals typically wear their devices for the entire day or at least half the day. Though their steps
+are rather low, which could implicate that they are using the device as a watch, rather than to track steps. Moderate Users typically have higher average steps for both all day users and most day users. High use, users are similar to the moderate use users, however they have a large portion of users who used the device for less than half a day, and had relatively reduced steps as well. Although this could just be due to variability as a result of the limited sample size.
+
+Overall, there isn't really a clear pattern between total steps and device usage.
+
+
+
+
+
+
+
+
